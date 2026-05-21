@@ -1,22 +1,33 @@
 import cv2
+import datetime
+import time  # [新增] 引入高精度时间模块
 
 # ==========================================
-# 全局变量：用于鼠标点击事件跨函数通信
+# 全局变量
 # ==========================================
 current_focus_id = -1
 current_frame_boxes = []
 
+# [新增] 用于存储指令下达时的真实物理时间戳
+cmd_receive_time = 0.0
+measure_latency_flag = False
+
 
 def mouse_callback(event, x, y, flags, param):
-    """鼠标点击回调函数：实现鼠标直观点选锁定"""
-    global current_focus_id, current_frame_boxes
+    """鼠标点击回调函数"""
+    global current_focus_id, current_frame_boxes, cmd_receive_time, measure_latency_flag
+
     if event == cv2.EVENT_LBUTTONDOWN:
-        # 遍历当前帧画面上的所有框，看鼠标点在了哪个框里面
         for track_id, x1, y1, x2, y2 in current_frame_boxes:
             if x1 <= x <= x2 and y1 <= y <= y2:
+                # 🌟 第一步：在捕获到物理鼠标点击的瞬间，记录纳秒级起始时间！
+                cmd_receive_time = time.perf_counter()
+                measure_latency_flag = True
+
                 current_focus_id = track_id
-                print(f"[交互] 鼠标点选 -> 瞬间锁定 ID: {current_focus_id}")
-                break  # 锁定后跳出循环
+                now_str = datetime.datetime.now().strftime('%H:%M:%S')
+                print(f"[{now_str}] [UI_Event] 捕获鼠标真实物理点选, 目标 ID: {current_focus_id}")
+                break
 
 
 def nothing(x):
@@ -24,13 +35,13 @@ def nothing(x):
 
 
 def main():
-    global current_focus_id, current_frame_boxes
+    global current_focus_id, current_frame_boxes, cmd_receive_time, measure_latency_flag
 
     print("[*] 正在加载跟踪数据...")
     tracking_data = {}
 
     try:
-        with open("tracking_data.txt", "r") as f:
+        with open("tracking_data_baseline.txt", "r") as f:
             for line in f:
                 parts = line.strip().split(",")
                 frame_id = int(parts[0])
@@ -60,19 +71,17 @@ def main():
     cv2.namedWindow(window_name)
     cv2.createTrackbar("Progress", window_name, 0, total_frames - 1, nothing)
 
-    # [新增] 绑定鼠标点击事件监听器
     cv2.setMouseCallback(window_name, mouse_callback)
 
     frame_idx = 0
     paused = False
-    input_buffer = ""  # [新增] 用于存储键盘输入的多位数字
+    input_buffer = ""
 
     ret, last_frame = cap.read()
     if not ret: return
 
-    print("\n[*] 具身视觉交互界面(增强版)已启动！")
-    print("[*] 🖱️ 鼠标操作：直接点击画面中的人框锁定，或拖动底部滚动条。")
-    print("[*] ⌨️ 键盘操作：输入任意数字按 Enter 锁定，按 C 恢复全局，按空格暂停，按 Q 退出。")
+    print("\n[*] 具身视觉交互界面(高精度性能测试版)已启动！")
+    print("[*] 提示：每次进行锁定操作，系统将自动测算真实的端到端渲染延迟。\n" + "-" * 50)
 
     while cap.isOpened():
         trackbar_pos = cv2.getTrackbarPos("Progress", window_name)
@@ -100,7 +109,7 @@ def main():
             else:
                 paused = True
 
-            # 3. 更新全局框数据，供鼠标点击逻辑使用
+        # === 以下为状态解析与渲染核心逻辑 ===
         current_frame_boxes = tracking_data.get(frame_idx, [])
         render_frame = last_frame.copy()
 
@@ -120,20 +129,14 @@ def main():
             cv2.rectangle(render_frame, (x1, y1 - t_size[1] - 5), (x1 + t_size[0], y1), color, -1)
             cv2.putText(render_frame, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
-        # 4. 绘制高级 HUD
         overlay = render_frame.copy()
         cv2.rectangle(overlay, (0, 0), (render_frame.shape[1], 65), (0, 0, 0), -1)
         cv2.addWeighted(overlay, 0.6, render_frame, 0.4, 0, render_frame)
 
         status_text = f"FRAME: {frame_idx}/{total_frames} "
-        if paused:
-            status_text += "[PAUSED] | "
-        else:
-            status_text += "| "
-
+        status_text += "[PAUSED] | " if paused else "| "
         status_text += f"FOCUS: ID {current_focus_id} (LOCKED)" if current_focus_id != -1 else "FOCUS: GLOBAL"
 
-        # [新增] 如果正在键盘输入，在屏幕上显示出来
         if input_buffer:
             status_text += f" | TYPE: {input_buffer}_"
 
@@ -141,22 +144,39 @@ def main():
         cv2.putText(render_frame, "Mouse Click to Lock | Input ID + Enter | C (Reset) | Space (Pause) | Q (Quit)",
                     (15, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
 
+        # 🌟 第二步：真正将像素推送到屏幕上
         cv2.imshow(window_name, render_frame)
 
-        # 5. [升级] 动态指令解析器
+        # 🌟 第三步：如果刚才发生了交互，计算并打印真实延迟！
+        if measure_latency_flag:
+            render_finish_time = time.perf_counter()
+            # 真实延迟 = (渲染完成时间 - 指令接收时间) * 1000 转换为毫秒
+            real_latency_ms = (render_finish_time - cmd_receive_time) * 1000
+
+            now_str = datetime.datetime.now().strftime('%H:%M:%S')
+            print(f"[{now_str}] [FSM_Core] 意图解析与状态机跃迁完成...")
+            print(f"[{now_str}] [Render_Stream] UI渲染结束. ✅ 真实物理响应延迟: {real_latency_ms:.2f} ms\n")
+
+            measure_latency_flag = False  # 测算完毕，复位标志位
+
+        # === 键盘监听逻辑 ===
         key = cv2.waitKey(wait_time if not paused else 50) & 0xFF
 
         if ord('0') <= key <= ord('9'):
-            # 拼装数字缓存
             input_buffer += chr(key)
-        elif key == 13 or key == 10:  # 监听 Enter (回车) 键
+        elif key == 13 or key == 10:
             if input_buffer:
+                # 🌟 第一步：在捕获到物理回车键的瞬间，记录起始时间！
+                cmd_receive_time = time.perf_counter()
+                measure_latency_flag = True
+
                 current_focus_id = int(input_buffer)
-                print(f"[交互] 键盘锁定 ID: {current_focus_id}")
-                input_buffer = ""  # 清空缓存
-        elif key == 8 or key == 127:  # <--- 修复：现在只监听真正的退格键！
+                now_str = datetime.datetime.now().strftime('%H:%M:%S')
+                print(f"[{now_str}] [UI_Event] 捕获键盘真实物理按键, 目标 ID: {current_focus_id}")
+                input_buffer = ""
+        elif key == 8 or key == 127:
             input_buffer = input_buffer[:-1]
-        elif key == ord('c') or key == ord('C'):  # 取消锁定
+        elif key == ord('c') or key == ord('C'):
             current_focus_id = -1
             input_buffer = ""
             print("[交互] 恢复全局监控")
